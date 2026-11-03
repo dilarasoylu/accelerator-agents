@@ -22,10 +22,13 @@ def create_inputs(dtype=jnp.float32):
 
 
 def workload(x, weight, bias):
-    """Gemm + Max + Subtract(max) + GELU."""
+    """Gemm + Max + Subtract(mean) + GELU."""
     x = jnp.matmul(x, weight) + bias
-    x_max = jnp.max(x, axis=1, keepdims=True)
-    x = x - x_max
+    # Max over the feature axis reduces each row to its max -> (N, 1); then center
+    # over the batch (axis 0). The source reduces with the max before subtracting a
+    # mean; subtracting the row-max from the full (N, F) matrix is a different op.
+    x = jnp.max(x, axis=1, keepdims=True)
+    x = x - jnp.mean(x, axis=0, keepdims=True)
     x = jax.nn.gelu(x)
     return x
 

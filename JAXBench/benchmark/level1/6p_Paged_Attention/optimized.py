@@ -726,7 +726,13 @@ def create_inputs(dtype=jnp.bfloat16):
     return q, k_pages, v_pages, lengths, page_indices
 
 
-def workload(q, k_pages, v_pages, lengths, page_indices):
+def workload(q, k_pages, v_pages, lengths, page_indices, cu_q_lens):
+    # Match create_inputs' 6 outputs. The paged-attention kernel expects a
+    # heads-first page layout, so transpose
+    # (pages, page_size, H_kv, D) -> (H_kv, pages, page_size, D).
+    # cu_q_lens is unused by this decode kernel.
+    k_pages = jnp.transpose(k_pages, (2, 0, 1, 3))
+    v_pages = jnp.transpose(v_pages, (2, 0, 1, 3))
     return paged_attention(
         q, k_pages, v_pages, lengths, page_indices,
         pages_per_compute_block=TUNED_PARAMS['pages_per_compute_block'],

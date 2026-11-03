@@ -32,13 +32,16 @@ def workload(x, y, bmm_weight, bmm_bias, in_weight, in_bias):
     # Linear
     x = x @ bmm_weight.T + bmm_bias
 
-    # InstanceNorm2d on (N, C, 1, 1)
-    x = jnp.expand_dims(jnp.expand_dims(x, 2), 3)
+    # InstanceNorm2d on (N, 1, 1, C): the normalized extent is the feature axis,
+    # matching x.unsqueeze(1).unsqueeze(1) in the source model. Reshaping to
+    # (N, C, 1, 1) instead normalizes over the two singleton dims, so the variance
+    # is 0 and the output collapses to ~0.
+    x = jnp.expand_dims(jnp.expand_dims(x, 1), 1)
     mean = jnp.mean(x, axis=(2, 3), keepdims=True)
     var = jnp.var(x, axis=(2, 3), keepdims=True)
     x = (x - mean) / jnp.sqrt(var + eps)
-    x = x * jnp.reshape(in_weight, (1, -1, 1, 1)) + jnp.reshape(in_bias, (1, -1, 1, 1))
-    x = jnp.squeeze(jnp.squeeze(x, axis=3), axis=2)
+    x = x * jnp.reshape(in_weight, (1, 1, 1, -1)) + jnp.reshape(in_bias, (1, 1, 1, -1))
+    x = jnp.squeeze(jnp.squeeze(x, axis=2), axis=1)
 
     # Residual add and multiply
     x = x + y
