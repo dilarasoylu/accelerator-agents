@@ -17,7 +17,11 @@ CONFIG = {
     'name': 'mamba2_2_7b_ssd',
     'model': 'Mamba-2-2.7B',
     'operator': 'state_space_duality',
-    'batch': 4,
+    # The matrix (parallel) SSD form materializes (B, H, S, S) f32 intermediates.
+    # At batch=4 that is 4*64*4096*4096 ~ 4.3e9 elems per tensor (~17 GB), and
+    # several are live at once, which OOMs a single TPU v6e (~32 GB HBM). batch=1
+    # keeps the native H/D/S and B*H*S*S ~ 1.1e9 (peak ~9 GB), so it fits.
+    'batch': 1,
     'seq_len': 4096,
     'num_heads': 64,
     'head_dim': 64,
