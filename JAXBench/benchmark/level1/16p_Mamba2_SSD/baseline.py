@@ -17,7 +17,7 @@ CONFIG = {
     'name': 'mamba2_2_7b_ssd',
     'model': 'Mamba-2-2.7B',
     'operator': 'state_space_duality',
-    'batch': 4,
+    'batch': 1,  # 4 OOMs a single v6e (~32 GB HBM): the (B,H,S,S) f32 intermediates are ~17 GB/tensor at batch 4
     'seq_len': 4096,
     'num_heads': 64,
     'head_dim': 64,
