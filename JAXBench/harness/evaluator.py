@@ -6,8 +6,10 @@ this module compiles the kernel, checks correctness against the baseline, benchm
 it, and returns a structured comparison.
 """
 
+import contextlib
 import json
 import os
+import random
 import sys
 import traceback
 
@@ -20,6 +22,23 @@ from JAXBench.harness.profiler import benchmark_fn
 from JAXBench.harness.correctness import check_correctness
 from JAXBench.harness.runner import get_flop_count
 from JAXBench.harness.tpu_specs import get_tpu_spec
+
+
+@contextlib.contextmanager
+def _reseeded(seed):
+    """Make create_inputs draw a fresh sample per seed even when it hardcodes jax.random.key(42) /
+    PRNGKey(0). Offsets the base seed passed to jax.random.key / PRNGKey by `seed` for the duration, so
+    a legacy create_inputs (which takes no seed argument) still produces a different, reproducible draw
+    per grade with no per-kernel change. Deterministic given `seed`."""
+    import jax.random as _jr
+    _key, _pk = _jr.key, _jr.PRNGKey
+    off = int(seed) & 0x7fffffff
+    _jr.key = lambda s=0, *a, **k: _key((int(s) + off) & 0x7fffffff, *a, **k)
+    _jr.PRNGKey = lambda s=0, *a, **k: _pk((int(s) + off) & 0x7fffffff, *a, **k)
+    try:
+        yield
+    finally:
+        _jr.key, _jr.PRNGKey = _key, _pk
 
 
 def evaluate_kernel(workload_name, kernel_path, tpu='auto', num_warmup=5,
@@ -65,23 +84,19 @@ def evaluate_kernel(workload_name, kernel_path, tpu='auto', num_warmup=5,
 
         skip_jit = getattr(baseline_mod, '_skip_jit', False)
 
+        # --- Build the config x seed grid (recommended scheme) ----------------------------------
+        # Instead of a single fixed config + fixed seed, grade over every CONFIGS entry (falling back to
+        # the single CONFIG) and over MDS_N_SEEDS freshly-drawn random seeds. A truly-random, re-drawn
+        # seed makes correctness a generalization check rather than a memorization of one fixed draw.
+        # Legacy kernels (single CONFIG, create_inputs hardcoding key(42)) still get multi-seed coverage
+        # via _reseeded, with no per-kernel change required.
         create_fn = getattr(baseline_mod, 'create_inputs')
-        if 'dtype' in create_fn.__code__.co_varnames:
-            inputs = create_fn(dtype=jnp.bfloat16)
-        else:
-            inputs = create_fn()
-        if not isinstance(inputs, (list, tuple)):
-            inputs = (inputs,)
-
-        # Get FLOP count from baseline
+        want_dtype = 'dtype' in create_fn.__code__.co_varnames
+        configs = getattr(baseline_mod, 'CONFIGS', None) or [getattr(baseline_mod, 'CONFIG', {})]
+        n_seeds = max(1, int(os.environ.get('MDS_N_SEEDS', '3')))
+        seeds = [random.randrange(1, 2 ** 31) for _ in range(n_seeds)]
         baseline_fn = baseline_mod.workload
-        xla_flops = get_flop_count(baseline_mod, baseline_fn, inputs, skip_jit)
-
-        # Run baseline to get reference output
         run_baseline = baseline_fn if skip_jit else jax.jit(baseline_fn)
-        ref_output = run_baseline(*inputs)
-        if hasattr(ref_output, 'block_until_ready'):
-            ref_output.block_until_ready()
 
         # --- Step 2: Load agent kernel ---
         try:
@@ -93,26 +108,55 @@ def evaluate_kernel(workload_name, kernel_path, tpu='auto', num_warmup=5,
 
         kernel_fn = kernel_mod.workload
         kernel_skip_jit = getattr(kernel_mod, '_skip_jit', False)
+        run_kernel = kernel_fn if kernel_skip_jit else jax.jit(kernel_fn)
 
-        # --- Step 3: Run agent kernel ---
-        try:
-            run_kernel = kernel_fn if kernel_skip_jit else jax.jit(kernel_fn)
-            test_output = run_kernel(*inputs)
-            if hasattr(test_output, 'block_until_ready'):
-                test_output.block_until_ready()
-        except Exception as e:
-            result['status'] = 'runtime_error'
-            result['error'] = str(e)[:300]
-            result['traceback'] = traceback.format_exc()[-500:]
-            return result
+        # --- Steps 3+4: run baseline + candidate and check correctness over the whole grid ---
+        inputs = None            # first draw kept for the FLOP count + the timing step below
+        ref_output = None
+        grid = []
+        for cfg in configs:
+            if cfg:
+                baseline_mod.CONFIG = cfg     # create_inputs / workload read CONFIG at call time
+            for seed in seeds:
+                with _reseeded(seed):
+                    drawn = create_fn(dtype=jnp.bfloat16) if want_dtype else create_fn()
+                if not isinstance(drawn, (list, tuple)):
+                    drawn = (drawn,)
+                try:
+                    r_out = run_baseline(*drawn)
+                    if hasattr(r_out, 'block_until_ready'):
+                        r_out.block_until_ready()
+                    t_out = run_kernel(*drawn)
+                    if hasattr(t_out, 'block_until_ready'):
+                        t_out.block_until_ready()
+                except Exception as e:
+                    result['status'] = 'runtime_error'
+                    result['error'] = str(e)[:300]
+                    result['traceback'] = traceback.format_exc()[-500:]
+                    return result
+                c = check_correctness(r_out, t_out)
+                grid.append({
+                    'config': {k: v for k, v in cfg.items() if isinstance(v, (int, float, str, bool))},
+                    'seed': seed, **c,
+                })
+                if inputs is None:
+                    inputs, ref_output = drawn, r_out
+                if not c['correct']:
+                    result['correctness'] = c
+                    result['correctness_grid'] = grid
+                    result['status'] = 'incorrect'
+                    return result
 
-        # --- Step 4: Check correctness ---
-        correctness = check_correctness(ref_output, test_output)
-        result['correctness'] = correctness
+        result['correctness'] = {
+            'correct': True, 'reason': 'ok',
+            'max_diff': max(g['max_diff'] for g in grid),
+            'within_fraction': min(g.get('within_fraction', 1.0) for g in grid),
+            'n_configs': len(configs), 'n_seeds': len(seeds),
+        }
+        result['correctness_grid'] = grid
 
-        if not correctness['correct']:
-            result['status'] = 'incorrect'
-            return result
+        # FLOP count from the baseline on the first draw (for the perf report below).
+        xla_flops = get_flop_count(baseline_mod, baseline_fn, inputs, skip_jit)
 
         # --- Step 5: Benchmark both ---
         jax.clear_caches()
