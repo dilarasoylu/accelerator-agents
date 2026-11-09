@@ -28,14 +28,14 @@ CONFIG = {
     'symbol': 'd',
 }
 
-def create_inputs():
+def create_inputs(dtype=jnp.bfloat16):
     key = jax.random.PRNGKey(0)
 
     num_heads = 128
     lkv_dim = 512
     r_dim = 64
-    q_dtype = jnp.bfloat16
-    kv_dtype = jnp.bfloat16
+    q_dtype = dtype
+    kv_dtype = dtype
 
     padded_r_dim = align_to(r_dim, 128)
     padded_lkv_dim = align_to(lkv_dim, 128)

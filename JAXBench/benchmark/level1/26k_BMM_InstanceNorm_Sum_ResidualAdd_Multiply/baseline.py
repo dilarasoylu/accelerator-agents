@@ -32,13 +32,13 @@ def workload(x, y, bmm_weight, bmm_bias, in_weight, in_bias):
     # Linear
     x = x @ bmm_weight.T + bmm_bias
 
-    # InstanceNorm2d on (N, C, 1, 1)
-    x = jnp.expand_dims(jnp.expand_dims(x, 2), 3)
+    # InstanceNorm2d over the feature axis: reshape to (N, 1, 1, C)
+    x = jnp.expand_dims(jnp.expand_dims(x, 1), 1)
     mean = jnp.mean(x, axis=(2, 3), keepdims=True)
     var = jnp.var(x, axis=(2, 3), keepdims=True)
     x = (x - mean) / jnp.sqrt(var + eps)
-    x = x * jnp.reshape(in_weight, (1, -1, 1, 1)) + jnp.reshape(in_bias, (1, -1, 1, 1))
-    x = jnp.squeeze(jnp.squeeze(x, axis=3), axis=2)
+    x = x * jnp.reshape(in_weight, (1, 1, 1, -1)) + jnp.reshape(in_bias, (1, 1, 1, -1))
+    x = jnp.squeeze(jnp.squeeze(x, axis=2), axis=1)
 
     # Residual add and multiply
     x = x + y
